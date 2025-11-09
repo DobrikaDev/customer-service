@@ -9,7 +9,7 @@ data:
     sql:
       host: postgres.default.svc.cluster.local
       port: 5432
-      username: postgres
+      user: postgres
       password: postgres
       name: postgres
 
