@@ -12,7 +12,7 @@ CREATE TABLE feedbacks (
 );
 
 ALTER TABLE feedbacks ADD CONSTRAINT fk_feedbacks_customers FOREIGN KEY (customer_id) REFERENCES customers (max_id);
-ALTER TABLE feedbacks ADD CONSTRAINT fk_feedbacks_users FOREIGN KEY (user_id) REFERENCES users (id);
+ALTER TABLE feedbacks ADD CONSTRAINT fk_feedbacks_users FOREIGN KEY (user_id) REFERENCES users (max_id);
 -- +goose StatementEnd
 
 -- +goose Down
