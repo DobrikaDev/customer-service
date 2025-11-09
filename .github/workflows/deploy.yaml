@@ -1,0 +1,118 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/dobrika-customer-service
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract database configuration
+        id: db-config
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          cfg_path = Path("deployments/config.yaml")
+          sql_cfg = {}
+          capture = False
+          for line in cfg_path.read_text().splitlines():
+              stripped = line.strip()
+              if stripped.startswith("#") or not stripped:
+                  continue
+              if stripped == "sql:":
+                  capture = True
+                  continue
+              if capture:
+                  if not line.startswith("  "):
+                      break
+                  key, value = stripped.split(":", 1)
+                  sql_cfg[key.strip()] = value.strip()
+
+          required_keys = {"host", "port", "user", "password", "name"}
+          missing = required_keys - sql_cfg.keys()
+          if missing:
+              raise SystemExit(f"Missing SQL config keys: {missing}")
+
+          output_path = Path(os.environ["GITHUB_OUTPUT"])
+          with output_path.open("a", encoding="utf-8") as fh:
+              for key in required_keys:
+                  fh.write(f"{key}={sql_cfg[key]}\n")
+          PY
+
+      - name: Install goose CLI
+        run: |
+          set -euo pipefail
+          GOOSE_VERSION="v3.18.0"
+          curl -sSfL "https://github.com/pressly/goose/releases/download/${GOOSE_VERSION}/goose_Linux_x86_64.tar.gz" -o goose.tar.gz
+          sudo tar -xzf goose.tar.gz -C /usr/local/bin goose
+          rm goose.tar.gz
+
+      - name: Run database migrations
+        env:
+          GOOSE_DRIVER: postgres
+          GOOSE_DBSTRING: postgresql://${{ steps.db-config.outputs.user }}:${{ steps.db-config.outputs.password }}@${{ steps.db-config.outputs.host }}:${{ steps.db-config.outputs.port }}/${{ steps.db-config.outputs.name }}?sslmode=disable
+        run: |
+          set -euo pipefail
+          goose -dir migrations/postgres up
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p "${HOME}/.kube"
+          echo "${KUBECONFIG_BASE64}" | base64 --decode > "${HOME}/.kube/config"
+        env:
+          KUBECONFIG_BASE64: ${{ secrets.KUBECONFIG_BASE64 }}
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f deployments/k8s/namespace.yaml
+          kubectl apply -f deployments/k8s/configmap.yaml
+          kubectl apply -f deployments/k8s/service.yaml
+          kubectl apply -f deployments/k8s/deployment.yaml
+
+      - name: Update deployment image
+        run: |
+          kubectl set image deployment/customer-service \
+            -n default \
+            customer-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
